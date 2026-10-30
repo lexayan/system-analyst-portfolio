@@ -1,0 +1,13 @@
+# Системные и временные файлы
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
+*.tmp
+*.bak
+
+# Папки сред разработки и сборки
+.vs/
+.idea/
+.vscode/
+x64/
