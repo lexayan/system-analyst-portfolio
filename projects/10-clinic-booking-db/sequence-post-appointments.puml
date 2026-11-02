@@ -1,0 +1,100 @@
+@startuml
+autonumber
+actor Пациент as Patient
+participant "Клиент\n(мобильное приложение / сайт)" as Client
+participant Backend
+database "PostgreSQL" as DB
+
+activate Patient
+Patient -> Client : Выбирает свободный слот\nи нажимает «Записаться»
+activate Client
+
+Client -> Backend : Записаться к врачу\nPOST /api/v1/appointments\n[Idempotency-Key, {slotId}]
+activate Backend
+
+== Доступ ==
+Backend -> Backend : Проверить JWT и роль patient
+activate Backend
+deactivate Backend
+
+alt JWT отсутствует, истёк или недействителен
+    Backend --> Client : 401 UNAUTHORIZED
+    Client --> Patient : Предлагает войти заново
+else роль не patient
+    Backend --> Client : 403 FORBIDDEN
+    Client --> Patient : Сообщает об отсутствии доступа
+else доступ по токену разрешён
+    Backend -> DB : Найти пациента в clinic.patient\nпо public_id = sub
+    activate DB
+    DB --> Backend : patient_id или пусто
+    deactivate DB
+
+    alt пациент не найден
+        Backend --> Client : 403 PATIENT_NOT_REGISTERED
+        Client --> Patient : Сообщает, что пациент не зарегистрирован
+    else пациент найден
+        == Валидация и проверка слота ==
+        Backend -> Backend : Проверить формат slotId и Idempotency-Key
+        activate Backend
+        deactivate Backend
+
+        alt формат некорректен
+            Backend --> Client : 400 VALIDATION_ERROR [список полей]
+            Client --> Patient : Показывает ошибку ввода
+        else формат корректен
+            Backend -> DB : Найти слот в clinic.schedule_slot\nпо public_id = slotId
+            activate DB
+            DB --> Backend : Данные слота или пусто
+            deactivate DB
+
+            alt слот не найден
+                Backend --> Client : 404 SLOT_NOT_FOUND
+                Client --> Patient : Сообщает, что слот не найден
+            else слот заблокирован или уже начался
+                Backend --> Client : 422 SLOT_NOT_AVAILABLE
+                Client --> Patient : Предлагает выбрать другое время
+            else слот доступен
+                == Создание записи ==
+                Backend -> DB : BEGIN; создать запись (Q2)\nINSERT clinic.appointment ... ON CONFLICT DO NOTHING
+                activate DB
+                DB --> Backend : Запись (created = true / false) или 0 строк
+                deactivate DB
+
+                alt запись создана (created = true)
+                    Backend -> DB : INSERT clinic.appointment_status_history (NULL → created);\nINSERT clinic.appointment_notification (reminder_24h); COMMIT
+                    activate DB
+                    DB --> Backend : Транзакция зафиксирована
+                    deactivate DB
+                    Backend --> Client : 201 Created, Location\n{appointmentId, status, slot, doctor, specialty, branch}
+                    Client --> Patient : Показывает подтверждение записи
+                else повтор с тем же Idempotency-Key и тем же слотом
+                    Backend -> DB : ROLLBACK
+                    activate DB
+                    DB --> Backend : Транзакция отменена
+                    deactivate DB
+                    Backend --> Client : 200 OK, данные ранее созданной записи
+                    Client --> Patient : Показывает подтверждение записи
+                else Idempotency-Key уже использован для другого слота
+                    Backend -> DB : ROLLBACK
+                    activate DB
+                    DB --> Backend : Транзакция отменена
+                    deactivate DB
+                    Backend --> Client : 409 IDEMPOTENCY_KEY_REUSED
+                    Client --> Patient : Просит повторить запись
+                else 0 строк: слот занят другой активной записью
+                    Backend -> DB : ROLLBACK
+                    activate DB
+                    DB --> Backend : Транзакция отменена
+                    deactivate DB
+                    Backend --> Client : 409 SLOT_ALREADY_BOOKED
+                    Client --> Patient : Сообщает, что слот занят,\nпредлагает выбрать другое время
+                end
+            end
+        end
+    end
+end
+
+deactivate Backend
+deactivate Client
+deactivate Patient
+@enduml
